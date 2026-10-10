@@ -1,0 +1,13 @@
+.env
+*.log
+node_modules/
+shots/
+.cache/
+auth.json
+*.traineddata
+# 本地代理产物（含节点凭据，不可提交）
+sb-config.json
+sing-box
+sing-box.tgz
+__pycache__/
+*.pyc

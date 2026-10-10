@@ -1,0 +1,17 @@
+{
+  "name": "aclclouds-auto-renew",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "renew": "node renew.mjs",
+    "power": "node power.mjs",
+    "check": "node --check common.mjs && node --check renew.mjs && node --check power.mjs && node --check proxy_helper.mjs",
+    "test": "node --test test/common.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}
