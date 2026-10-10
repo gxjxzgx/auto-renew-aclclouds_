@@ -1,1 +1,257 @@
+name: ACLClouds Auto
 
+# 续期 + 保活合并为一个工作流，两个 job 按触发来源分流：
+# - schedule：github.event.schedule 区分是哪条 cron 触发，只跑对应的 job
+# - workflow_dispatch：inputs.task 选择跑哪个（all / renew / power）
+on:
+  schedule:
+    # 续期：每两天 23:28 UTC（北京时间次日 07:28）
+    - cron: '28 23 */2 * *'
+    # 保活：每天 02:00 / 14:00 UTC（北京时间 10:00 / 22:00）
+    - cron: '0 2,14 * * *'
+  workflow_dispatch:
+    inputs:
+      task:
+        description: '运行哪个任务'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, renew, power]
+      dry_run:
+        description: 'Dry run（renew：只校验不真正续期；power：只检查不真正开机）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: aclclouds-auto
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    if: >
+      (github.event_name == 'workflow_dispatch' && (inputs.task == 'all' || inputs.task == 'renew')) ||
+      (github.event_name == 'schedule' && github.event.schedule == '28 23 */2 * *')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v6
+        with:
+          path: auth.json
+          key: acl-session-${{ github.run_id }}
+          restore-keys: |
+            acl-session-
+
+      # 本地代理用的 sing-box 二进制（参考 hohai；node_proxy.py 优先用 SING_BOX_BIN）
+      - name: Restore sing-box cache
+        uses: actions/cache@v6
+        with:
+          path: ~/sing-box-bin/sing-box
+          key: sing-box-v1.14.1-linux-amd64
+
+      - name: Prepare sing-box
+        run: |
+          mkdir -p ~/sing-box-bin
+          if [ ! -x ~/sing-box-bin/sing-box ]; then
+            echo "缓存未命中，下载 sing-box v1.14.1 ..."
+            curl -sL "https://github.com/SagerNet/sing-box/releases/download/v1.14.1/sing-box-1.14.1-linux-amd64.tar.gz" -o /tmp/sb.tgz
+            tar -xzf /tmp/sb.tgz -C /tmp
+            mv /tmp/sing-box-1.14.1-linux-amd64/sing-box ~/sing-box-bin/sing-box
+            chmod +x ~/sing-box-bin/sing-box
+            rm -rf /tmp/sb.tgz /tmp/sing-box-1.14.1-linux-amd64
+          else
+            echo "命中 sing-box 缓存，跳过下载"
+          fi
+          ~/sing-box-bin/sing-box version
+
+      - name: Install
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Renew
+        id: run
+        env:
+          ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
+          ACL_PASSWORD: ${{ secrets.ACL_PASSWORD }}
+          ACL_SERVER_ID: ${{ secrets.ACL_SERVER_ID }}
+          ACL_BASE_URL: ${{ vars.ACL_BASE_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          # 本地代理（参考 hohai）：为空则直连；代理失败自动回退直连
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          SING_BOX_BIN: ~/sing-box-bin/sing-box
+          SING_BOX_SHA256: ${{ secrets.SING_BOX_SHA256 }}
+          # 可选：设为 chromium 使用新版 headless（更接近真实浏览器，验证码被拦时试试）
+          PW_CHANNEL: ${{ vars.PW_CHANNEL }}
+          # 可选：浏览器语言（默认 en-US；站点文案随语言变化，如需 fr-FR 在 Variables 里设 ACL_LOCALE）
+          ACL_LOCALE: ${{ vars.ACL_LOCALE }}
+        run: node renew.mjs
+
+      # 失败时保留截图（仅 3 天），方便排查验证码/选择器问题；shots 里可能有账号页面，勿把仓库设为公开
+      - name: 上传失败截图
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: renew-shots-${{ github.run_id }}
+          path: shots/
+          if-no-files-found: ignore
+          retention-days: 3
+
+      # 脚本之前的步骤（装依赖/下载 sing-box 等）失败时脚本没机会发 TG，这里兜底提醒一次
+      - name: 脚本前置步骤失败通知
+        if: failure() && steps.run.conclusion == 'skipped'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ] && exit 0
+          curl -sS --max-time 15 --retry 2 -o /dev/null \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=❌ ACLClouds 续期 工作流在运行脚本前失败（依赖安装/下载等）：${RUN_URL}" || true
+
+      - name: 仅保留最近 10 条运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="$GITHUB_REPOSITORY"
+          current="${{ github.run_id }}"
+          n=0
+          for id in $(gh run list --repo "$REPO" --workflow aclclouds.yml --limit 100 --json databaseId --jq '.[].databaseId'); do
+            [ "$id" = "$current" ] && continue
+            n=$((n+1))
+            if [ "$n" -gt 9 ]; then
+              echo "删除旧运行记录 $id"
+              gh run delete "$id" --repo "$REPO" || true
+            fi
+          done
+
+  power:
+    if: >
+      (github.event_name == 'workflow_dispatch' && (inputs.task == 'all' || inputs.task == 'power')) ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 2,14 * * *')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v6
+        with:
+          path: auth.json
+          key: acl-session-${{ github.run_id }}
+          restore-keys: |
+            acl-session-
+
+      # 本地代理用的 sing-box 二进制（参考 hohai；node_proxy.py 优先用 SING_BOX_BIN）
+      - name: Restore sing-box cache
+        uses: actions/cache@v6
+        with:
+          path: ~/sing-box-bin/sing-box
+          key: sing-box-v1.14.1-linux-amd64
+
+      - name: Prepare sing-box
+        run: |
+          mkdir -p ~/sing-box-bin
+          if [ ! -x ~/sing-box-bin/sing-box ]; then
+            echo "缓存未命中，下载 sing-box v1.14.1 ..."
+            curl -sL "https://github.com/SagerNet/sing-box/releases/download/v1.14.1/sing-box-1.14.1-linux-amd64.tar.gz" -o /tmp/sb.tgz
+            tar -xzf /tmp/sb.tgz -C /tmp
+            mv /tmp/sing-box-1.14.1-linux-amd64/sing-box ~/sing-box-bin/sing-box
+            chmod +x ~/sing-box-bin/sing-box
+            rm -rf /tmp/sb.tgz /tmp/sing-box-1.14.1-linux-amd64
+          else
+            echo "命中 sing-box 缓存，跳过下载"
+          fi
+          ~/sing-box-bin/sing-box version
+
+      - name: Install
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Power check
+        id: run
+        env:
+          ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
+          ACL_PASSWORD: ${{ secrets.ACL_PASSWORD }}
+          ACL_SERVER_ID: ${{ secrets.ACL_SERVER_ID }}
+          ACL_BASE_URL: ${{ vars.ACL_BASE_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          # 本地代理（参考 hohai）：为空则直连；代理失败自动回退直连
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          SING_BOX_BIN: ~/sing-box-bin/sing-box
+          SING_BOX_SHA256: ${{ secrets.SING_BOX_SHA256 }}
+          # 可选：设为 chromium 使用新版 headless（更接近真实浏览器，验证码被拦时试试）
+          PW_CHANNEL: ${{ vars.PW_CHANNEL }}
+          # 可选：浏览器语言（默认 en-US；站点文案随语言变化，如需 fr-FR 在 Variables 里设 ACL_LOCALE）
+          ACL_LOCALE: ${{ vars.ACL_LOCALE }}
+        run: node power.mjs
+
+      # 失败时保留截图（仅 3 天），方便排查验证码/选择器问题；shots 里可能有账号页面，勿把仓库设为公开
+      - name: 上传失败截图
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: power-shots-${{ github.run_id }}
+          path: shots/
+          if-no-files-found: ignore
+          retention-days: 3
+
+      # 脚本之前的步骤（装依赖/下载 sing-box 等）失败时脚本没机会发 TG，这里兜底提醒一次
+      - name: 脚本前置步骤失败通知
+        if: failure() && steps.run.conclusion == 'skipped'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ] && exit 0
+          curl -sS --max-time 15 --retry 2 -o /dev/null \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=❌ ACLClouds 保活 工作流在运行脚本前失败（依赖安装/下载等）：${RUN_URL}" || true
+
+      - name: 仅保留最近 10 条运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="$GITHUB_REPOSITORY"
+          current="${{ github.run_id }}"
+          n=0
+          for id in $(gh run list --repo "$REPO" --workflow aclclouds.yml --limit 100 --json databaseId --jq '.[].databaseId'); do
+            [ "$id" = "$current" ] && continue
+            n=$((n+1))
+            if [ "$n" -gt 9 ]; then
+              echo "删除旧运行记录 $id"
+              gh run delete "$id" --repo "$REPO" || true
+            fi
+          done
