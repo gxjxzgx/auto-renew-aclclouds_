@@ -12,6 +12,6 @@
     "test": "node --test test/common.test.mjs"
   },
   "dependencies": {
-    "playwright": "1.63.0"
+    "playwright": "1.64.0"
   }
 }
