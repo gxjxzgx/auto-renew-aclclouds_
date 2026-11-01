@@ -449,9 +449,13 @@ export function normalizeState(s) {
 
 let hostingDiagDone = false;
 
-/** 读新平台状态：依次试 app 元数据 / app/server / app/resources / app/status */
+/**
+ * 读新平台运行状态。注意：app 元数据里的 status 不是实时运行状态
+ *（2026-11-01 实测：面板显示运行中时它仍为 "stopped"）；实时状态与 POST /power
+ * 返回的 {state, uptime_s, ...} 同源，所以先试 GET /power、/runtime，元数据放最后兜底。
+ */
 export async function hostingState(page, appId) {
-  for (const sub of ['', '/server', '/resources', '/status']) {
+  for (const sub of ['/power', '/runtime', '/status', '/resources', '']) {
     const r = await api(page, hostingPath(appId, sub));
     if (!hostingDiagDone) {
       const keys = r.data && typeof r.data === 'object' ? Object.keys(r.data.attributes || r.data).join(',') : '';

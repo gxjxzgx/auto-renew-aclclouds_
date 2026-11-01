@@ -179,7 +179,7 @@ async function getResources(page, id, appId) {
     try {
       const h = await hostingState(page, appId);
       const a = h.data?.attributes || h.data || {};
-      const up = a.uptime ?? a.resources?.uptime ?? a.runtime?.uptime ?? null;
+      const up = a.uptime ?? a.resources?.uptime ?? a.runtime?.uptime ?? (typeof a.uptime_s === 'number' ? a.uptime_s * 1000 : null);
       return { state: h.state, uptimeMs: typeof up === 'number' ? up : null };
     } catch (e) {
       log(`hosting 状态异常 (${appId}): ${e.message}`);
