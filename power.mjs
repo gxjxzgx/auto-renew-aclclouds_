@@ -91,8 +91,40 @@ async function powerStart(page, id, appId) {
   return ok;
 }
 
+/**
+ * 新平台：没有可 GET 的实时状态接口（元数据 status 会一直是 "stopped"，与面板 Online 不符；
+ * /power 只支持 POST、/runtime 只支持 PUT）。POST /power {action:"start"} 对运行中的 app
+ * 是幂等的，且响应体带实时 {state, uptime_s, crash_error}，所以直接用它做「检查+开机」。
+ */
+async function ensureRunningHosting(page, server) {
+  const { id, name, appId } = server;
+  if (DRY_RUN) {
+    log(`[DRY_RUN] 新平台跳过 power start（${name}）`);
+    return { id, name, ok: true, action: 'skip', text: `${name}: DRY_RUN，未检查` };
+  }
+  let r = await hostingStart(page, appId);
+  const read = (x) => String(x?.data?.state || x?.data?.attributes?.state || '').toLowerCase();
+  let st = read(r);
+  log(`[${name}] 新平台实时状态: ${st || '未知'} uptime_s=${r?.data?.uptime_s ?? '-'}`);
+  for (let i = 0; i < 4 && r.ok && st !== 'running'; i++) {
+    await page.waitForTimeout(15000);
+    r = await hostingStart(page, appId);
+    st = read(r);
+    log(`[${name}] 轮询实时状态: ${st || '未知'}`);
+  }
+  if (r.ok && st === 'running') {
+    const up = Number(r.data?.uptime_s || 0);
+    return up > 60
+      ? { id, name, ok: true, action: 'skip', text: `${name}: 运行中，跳过` }
+      : { id, name, ok: true, action: 'started', text: `${name}: 开机成功` };
+  }
+  const err = r.data?.crash_error || r.data?.last_error?.code || '';
+  return { id, name, ok: false, action: 'start_fail', text: `${name}: 新平台开机失败 ${r.status} ${st} ${err}`.trim() };
+}
+
 async function ensureRunning(page, server) {
   const { id, name, appId } = server;
+  if (appId) return ensureRunningHosting(page, server);
   const state = await getState(page, id, appId);
   log(`[${name}] 状态: ${state}`);
 
