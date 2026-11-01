@@ -176,15 +176,8 @@ async function discover(page) {
 
 async function getResources(page, id, appId) {
   if (appId) {
-    try {
-      const h = await hostingState(page, appId);
-      const a = h.data?.attributes || h.data || {};
-      const up = a.uptime ?? a.resources?.uptime ?? a.runtime?.uptime ?? (typeof a.uptime_s === 'number' ? a.uptime_s * 1000 : null);
-      return { state: h.state, uptimeMs: typeof up === 'number' ? up : null };
-    } catch (e) {
-      log(`hosting 状态异常 (${appId}): ${e.message}`);
-      return { state: 'unknown', uptimeMs: null };
-    }
+    // 新平台没有只读的实时状态接口（元数据 status 不准），续期任务不碰开机，状态交给保活任务
+    return { state: 'unknown', uptimeMs: null };
   }
   try {
     const r = await api(page, `/api/client/servers/${id}/resources`);
