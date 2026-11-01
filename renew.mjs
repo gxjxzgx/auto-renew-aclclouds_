@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { setupProxy } from './proxy_helper.mjs';
 import {
   log, maskAccount, createShot, tg, api, resolveExecutablePath,
-  solveCapWidget, login,
+  solveCapWidget, login, hostingAppIdOf, hostingPath, hostingState,
 } from './common.mjs';
 
 const BASE = (process.env.ACL_BASE_URL || 'https://aclclouds.com').replace(/\/+$/, '');
@@ -150,6 +150,7 @@ async function findServer(page, id, uuid) {
     uuid: item.attributes.uuid,
     name: item.attributes.name || item.attributes.identifier,
     expiresAt: item.attributes.expires_at || null,
+    appId: hostingAppIdOf(item.attributes),
   };
 }
 
@@ -164,6 +165,7 @@ async function discover(page) {
           uuid: item.attributes.uuid,
           name: item.attributes.name || item.attributes.identifier,
           expiresAt: item.attributes.expires_at || null,
+          appId: hostingAppIdOf(item.attributes),
         });
       }
     }
@@ -172,7 +174,18 @@ async function discover(page) {
   return servers;
 }
 
-async function getResources(page, id) {
+async function getResources(page, id, appId) {
+  if (appId) {
+    try {
+      const h = await hostingState(page, appId);
+      const a = h.data?.attributes || h.data || {};
+      const up = a.uptime ?? a.resources?.uptime ?? a.runtime?.uptime ?? null;
+      return { state: h.state, uptimeMs: typeof up === 'number' ? up : null };
+    } catch (e) {
+      log(`hosting 状态异常 (${appId}): ${e.message}`);
+      return { state: 'unknown', uptimeMs: null };
+    }
+  }
   try {
     const r = await api(page, `/api/client/servers/${id}/resources`);
     if (r.status !== 200) {
@@ -287,7 +300,16 @@ async function tryRenew(page, server) {
   log(`检查续期: ${name} (${id})`);
 
   // 先试 API：便宜，未到窗口直接 skip，不进弹窗
-  const r = await api(page, `/api/client/servers/${id}/upgrade/renew`, 'POST', {});
+  // 新平台：POST /api/client/hosting/apps/{uuid}/renew；旧平台：/servers/{id}/upgrade/renew
+  const renewPath = server.appId
+    ? hostingPath(server.appId, '/renew')
+    : `/api/client/servers/${id}/upgrade/renew`;
+  let r = await api(page, renewPath, 'POST', {});
+  if (server.appId && (r.status === 404 || r.status === 405)) {
+    log(`新平台续期接口 HTTP ${r.status}，回退旧接口`);
+    r = await api(page, `/api/client/servers/${id}/upgrade/renew`, 'POST', {});
+  }
+  log(`续期接口 ${renewPath.replace(/[0-9a-f-]{36}/, (m) => m.slice(0, 8) + '…')} → HTTP ${r.status}`);
   const c = classifyRenew(r);
 
   if (c.ok && c.skip) {
@@ -400,7 +422,7 @@ async function main() {
         res.errShot = await shot(page, '99-error.png');
       }
       try {
-        res.resources = await getResources(page, server.id);
+        res.resources = await getResources(page, server.id, server.appId);
       } catch { /* 忽略状态读取失败 */ }
       results.push(res);
     }

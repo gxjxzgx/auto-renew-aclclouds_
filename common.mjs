@@ -395,3 +395,94 @@ export async function login(page, shot, { base, user, pass, authPath }) {
   await page.context().storageState({ path: authPath });
   log(`登录成功，会话写入 ${authPath}`);
 }
+
+/* ---------------- 新平台（hosting apps，2026-10 底迁移） ---------------- */
+/*
+ * 2026-10-29 起 ACLClouds 把免费 bot 迁到新平台：
+ * - /api/client 里的 server 条目带 attributes.hosting_app.id（UUID）
+ * - 旧 /api/client/servers/{id}/power 返回 409 "Ce bot tourne désormais sur la nouvelle plateforme"
+ * - 旧 /resources 返回 504
+ * - 新接口：/api/client/hosting/apps/{uuid}（元数据），/server（详情含 expires_at），/renew（续期）
+ *   （参考 messymidi/ACLCloudFreeBotToolKit 100cdc1 的实现）
+ * 开机 / 状态接口官方未公开，这里按候选顺序探测，并把响应结构打到日志便于后续收敛。
+ */
+
+export function hostingAppIdOf(attrs) {
+  const id = attrs?.hosting_app?.id || attrs?.hosting_app_id || '';
+  return /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(String(id)) ? String(id) : '';
+}
+
+export const hostingPath = (appId, sub = '') => `/api/client/hosting/apps/${encodeURIComponent(appId)}${sub}`;
+
+const STATE_KEYS = ['current_state', 'state', 'status', 'runtime_status', 'power_state', 'container_status'];
+
+function pickState(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 3) return '';
+  const a = obj.attributes && typeof obj.attributes === 'object' ? obj.attributes : obj;
+  for (const k of STATE_KEYS) {
+    const v = a[k];
+    if (typeof v === 'string' && v) return v.toLowerCase();
+    if (v && typeof v === 'object') {
+      const s = pickState(v, depth + 1);
+      if (s) return s;
+    }
+  }
+  for (const k of ['runtime', 'resources', 'server', 'container', 'data']) {
+    if (a[k] && typeof a[k] === 'object') {
+      const s = pickState(a[k], depth + 1);
+      if (s) return s;
+    }
+  }
+  return '';
+}
+
+/** 把各种写法归一成 running / starting / offline / stopping / unknown */
+export function normalizeState(s) {
+  const t = String(s || '').toLowerCase();
+  if (!t) return 'unknown';
+  if (/^(running|online|started|active|up|healthy)$/.test(t)) return 'running';
+  if (/start|deploy|build|pending|boot|install|creat|restart/.test(t)) return 'starting';
+  if (/stopping/.test(t)) return 'stopping';
+  if (/offline|stopped|exited|dead|down|sleep|suspend|crash|fail|error|inactive/.test(t)) return 'offline';
+  return t;
+}
+
+let hostingDiagDone = false;
+
+/** 读新平台状态：依次试 app 元数据 / app/server / app/resources / app/status */
+export async function hostingState(page, appId) {
+  for (const sub of ['', '/server', '/resources', '/status']) {
+    const r = await api(page, hostingPath(appId, sub));
+    if (!hostingDiagDone) {
+      const keys = r.data && typeof r.data === 'object' ? Object.keys(r.data.attributes || r.data).join(',') : '';
+      log(`[hosting] GET ${sub || '/'} HTTP ${r.status} keys=[${keys}] ${JSON.stringify(r.data).slice(0, 300)}`);
+    }
+    if (r.status !== 200) continue;
+    const s = pickState(r.data);
+    if (s) {
+      hostingDiagDone = true;
+      return { state: normalizeState(s), raw: s, data: r.data };
+    }
+  }
+  hostingDiagDone = true;
+  return { state: 'unknown', raw: '', data: null };
+}
+
+/** 新平台开机：候选接口依次试，404/405 换下一个，其它状态即为结论 */
+export async function hostingStart(page, appId) {
+  const candidates = [
+    ['/power', { signal: 'start' }],
+    ['/start', {}],
+    ['/power/start', {}],
+    ['/actions/start', {}],
+  ];
+  let last = null;
+  for (const [sub, body] of candidates) {
+    const r = await api(page, hostingPath(appId, sub), 'POST', body);
+    log(`[hosting] POST ${sub} HTTP ${r.status} ${JSON.stringify(r.data).slice(0, 200)}`);
+    last = { sub, ...r };
+    if (r.status === 404 || r.status === 405) continue;
+    return { ok: r.status >= 200 && r.status < 300, ...last };
+  }
+  return { ok: false, ...last };
+}

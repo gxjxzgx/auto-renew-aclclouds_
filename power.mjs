@@ -17,6 +17,9 @@ import {
   api,
   resolveExecutablePath,
   login,
+  hostingAppIdOf,
+  hostingState,
+  hostingStart,
 } from './common.mjs';
 
 const BASE = (process.env.ACL_BASE_URL || 'https://aclclouds.com').replace(
@@ -43,6 +46,7 @@ async function discover(page) {
           id: item.attributes.identifier,
           uuid: item.attributes.uuid,
           name: item.attributes.name || item.attributes.identifier,
+          appId: hostingAppIdOf(item.attributes),
         });
       }
     }
@@ -54,12 +58,13 @@ async function discover(page) {
     servers.push({ id: SERVER_ID, uuid: SERVER_ID, name: SERVER_ID });
   }
   log(
-    `发现服务: ${servers.map((s) => `${s.name}(${s.id})`).join(', ') || '(无)'}`,
+    `发现服务: ${servers.map((s) => `${s.name}(${s.id}${s.appId ? ` 新平台:${s.appId.slice(0, 8)}` : ''})`).join(', ') || '(无)'}`,
   );
   return servers;
 }
 
-async function getState(page, id) {
+async function getState(page, id, appId) {
+  if (appId) return (await hostingState(page, appId)).state;
   const r = await api(page, `/api/client/servers/${id}/resources`);
   if (r.status !== 200) {
     log(`resources HTTP ${r.status} for ${id}`);
@@ -69,25 +74,26 @@ async function getState(page, id) {
   return state;
 }
 
-async function powerStart(page, id) {
+async function powerStart(page, id, appId) {
   if (DRY_RUN) {
     log(`[DRY_RUN] 跳过 power start ${id}`);
     return true;
   }
+  if (appId) return (await hostingStart(page, appId)).ok;
   const r = await api(page, `/api/client/servers/${id}/power`, 'POST', {
     signal: 'start',
   });
   // 204 / 200 均视为接受
   const ok = r.status === 204 || r.status === 200;
   log(
-    `power start ${id}: HTTP ${r.status} ${ok ? 'OK' : JSON.stringify(r.data).slice(0, 120)}`,
+    `power start ${id}: HTTP ${r.status} ${ok ? 'OK' : JSON.stringify(r.data).slice(0, 400)}`,
   );
   return ok;
 }
 
 async function ensureRunning(page, server) {
-  const { id, name } = server;
-  const state = await getState(page, id);
+  const { id, name, appId } = server;
+  const state = await getState(page, id, appId);
   log(`[${name}] 状态: ${state}`);
 
   if (state === 'running') {
@@ -111,14 +117,16 @@ async function ensureRunning(page, server) {
 
   // offline / stopping / unknown → 开机
   log(`[${name}] 尝试开机...`);
-  const sent = await powerStart(page, id);
+  const sent = await powerStart(page, id, appId);
   if (!sent) {
     return {
       id,
       name,
       ok: false,
       action: 'start_fail',
-      text: `${name}: 开机请求失败（可能已挂起，需先续期）`,
+      text: appId
+        ? `${name}: 新平台开机请求失败（详见日志 [hosting]）`
+        : `${name}: 开机请求失败（可能已挂起，需先续期）`,
     };
   }
 
@@ -126,7 +134,7 @@ async function ensureRunning(page, server) {
   const deadline = Date.now() + POLL_SEC * 1000;
   while (Date.now() < deadline) {
     await page.waitForTimeout(5000);
-    final = await getState(page, id);
+    final = await getState(page, id, appId);
     log(`[${name}] 轮询状态: ${final}`);
     if (final === 'running') break;
   }
