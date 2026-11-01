@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { setupProxy } from './proxy_helper.mjs';
 import {
   log, maskAccount, createShot, tg, api, resolveExecutablePath,
-  solveCapWidget, login, hostingAppIdOf, hostingPath, hostingState,
+  solveCapWidget, login, hostingAppIdOf, hostingPath, hostingState, hostingStart, normalizeState,
 } from './common.mjs';
 
 const BASE = (process.env.ACL_BASE_URL || 'https://aclclouds.com').replace(/\/+$/, '');
@@ -176,8 +176,18 @@ async function discover(page) {
 
 async function getResources(page, id, appId) {
   if (appId) {
-    // 新平台没有只读的实时状态接口（元数据 status 不准），续期任务不碰开机，状态交给保活任务
-    return { state: 'unknown', uptimeMs: null };
+    // 新平台没有只读的实时状态接口（元数据 status 不准，GET /power 405）。
+    // POST /power {action:"start"} 对运行中的 app 幂等，响应带实时 state/uptime_s，
+    // 与保活任务行为一致（停机时会顺带开机）。
+    try {
+      const r = await hostingStart(page, appId);
+      const st = String(r.data?.state || '').toLowerCase();
+      const up = typeof r.data?.uptime_s === 'number' ? r.data.uptime_s * 1000 : null;
+      return { state: r.ok && st ? normalizeState(st) : 'unknown', uptimeMs: up };
+    } catch (e) {
+      log(`hosting 状态异常 (${appId}): ${e.message}`);
+      return { state: 'unknown', uptimeMs: null };
+    }
   }
   try {
     const r = await api(page, `/api/client/servers/${id}/resources`);
