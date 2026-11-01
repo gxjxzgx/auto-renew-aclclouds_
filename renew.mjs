@@ -40,8 +40,8 @@ const DRY_RUN = process.env.DRY_RUN === '1' || process.env.DRY_RUN === 'true';
 const AUTH = path.resolve(process.env.ACL_AUTH_STATE || 'auth.json');
 const SHOT = path.resolve('shots');
 
-// 续期窗口：到期前 2 天（窗口外无 Renew 入口，API 返回 renewal_not_available）
-const RENEW_WINDOW_MS = 2 * 86400000;
+// 续期窗口：新平台为到期前 7 天（2026-11 起，旧平台为 2 天）
+const RENEW_WINDOW_MS = 7 * 86400000;
 
 const shot = createShot(SHOT);
 
@@ -98,7 +98,7 @@ function stateLine(state) {
   }
 }
 
-/** 可续期时间：窗口 = 到期前 2 天 */
+/** 可续期时间：窗口 = 到期前 7 天 */
 function renewInText(expiresAt) {
   if (!expiresAt) return '未知';
   const windowAt = new Date(expiresAt).getTime() - RENEW_WINDOW_MS;
@@ -213,6 +213,10 @@ function classifyRenew(r) {
     return { ok: true, skip: true, captcha: false, text: '未到续期窗口' };
   }
   const blob = JSON.stringify(r.data);
+  // 新平台：到期前 7 天内才可续期，否则 422 renew_too_early
+  if (r.status === 422 && /renew_too_early/i.test(blob)) {
+    return { ok: true, skip: true, captcha: false, text: '未到续期窗口（到期前 7 天开放）' };
+  }
   if (r.status === 403 && /captcha_required/i.test(blob)) {
     return { ok: false, skip: false, captcha: true, text: 'HTTP 403 captcha_required' };
   }

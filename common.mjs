@@ -471,7 +471,7 @@ export async function hostingState(page, appId) {
 /** 新平台开机：候选接口依次试，404/405 换下一个，其它状态即为结论 */
 export async function hostingStart(page, appId) {
   const candidates = [
-    ['/power', { signal: 'start' }],
+    ['/power', { action: 'start' }], // 2026-11-01 实测：新平台要求 action 字段
     ['/start', {}],
     ['/power/start', {}],
     ['/actions/start', {}],
@@ -481,7 +481,7 @@ export async function hostingStart(page, appId) {
     const r = await api(page, hostingPath(appId, sub), 'POST', body);
     log(`[hosting] POST ${sub} HTTP ${r.status} ${JSON.stringify(r.data).slice(0, 200)}`);
     last = { sub, ...r };
-    if (r.status === 404 || r.status === 405) continue;
+    if (r.status === 404 || r.status === 405 || r.status === 422) continue;
     return { ok: r.status >= 200 && r.status < 300, ...last };
   }
   return { ok: false, ...last };
