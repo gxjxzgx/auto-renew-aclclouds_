@@ -23,6 +23,11 @@ on:
         required: false
         default: false
         type: boolean
+      retried:
+        description: '内部用：开机接口 5xx 后自动重跑（先等 5 分钟，不再重跑）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -231,6 +236,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: 等待 5 分钟（503 自动重跑）
+        if: ${{ inputs.retried == true }}
+        run: echo "上次开机接口 5xx，等待 5 分钟后重试"; sleep 300
       - uses: actions/checkout@v7
       - name: 加载共享变量（env-config）
         uses: actions/checkout@v7
@@ -311,6 +319,7 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Power check
+        id: power
         id: run
         env:
           ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
@@ -329,7 +338,17 @@ jobs:
           PW_CHANNEL: ${{ vars.PW_CHANNEL }}
           # 可选：浏览器语言（默认 en-US；站点文案随语言变化，如需 fr-FR 在 Variables 里设 ACL_LOCALE）
           ACL_LOCALE: ${{ vars.ACL_LOCALE }}
+          RETRIED: ${{ inputs.retried == true }}
         run: node power.mjs
+
+      - name: 503 后重跑工作流
+        if: ${{ failure() && steps.power.outputs.retry == '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/aclclouds.yml/dispatches" \
+            -f ref="$GITHUB_REF_NAME" -f 'inputs[task]=power' -f 'inputs[retried]=true'
+          echo "✅ 已触发重跑（新运行会先等 5 分钟）"
 
       # 失败时保留截图（仅 3 天），方便排查验证码/选择器问题；shots 里可能有账号页面，勿把仓库设为公开
       - name: 上传失败截图
