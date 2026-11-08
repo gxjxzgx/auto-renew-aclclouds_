@@ -103,12 +103,6 @@ async function ensureRunningHosting(page, server) {
     return { id, name, ok: true, action: 'skip', text: `${name}: DRY_RUN，未检查` };
   }
   let r = await hostingStart(page, appId);
-  if (!r.ok && r.status >= 500) {
-    log(`[${name}] 开机接口 ${r.status}（节点暂时不可达），5 分钟后重试一次`);
-    await page.waitForTimeout(300000);
-    r = await hostingStart(page, appId);
-    log(`[${name}] 重试结果: HTTP ${r.status}`);
-  }
   const read = (x) => String(x?.data?.state || x?.data?.attributes?.state || '').toLowerCase();
   let st = read(r);
   log(`[${name}] 新平台实时状态: ${st || '未知'} uptime_s=${r?.data?.uptime_s ?? '-'}`);
@@ -125,7 +119,11 @@ async function ensureRunningHosting(page, server) {
       : { id, name, ok: true, action: 'started', text: `${name}: 开机成功` };
   }
   const err = r.data?.crash_error || r.data?.last_error?.code || '';
-  return { id, name, ok: false, action: 'start_fail', text: `${name}: 新平台开机失败 ${r.status} ${st} ${err}`.trim() };
+  return {
+    id, name, ok: false, action: 'start_fail',
+    retryable: !r.ok && r.status >= 500,
+    text: `${name}: 新平台开机失败 ${r.status} ${st} ${err}`.trim(),
+  };
 }
 
 async function ensureRunning(page, server) {
@@ -294,7 +292,15 @@ async function main() {
     results.every((r) => r.action === 'skip' || r.action === 'wait');
   const msg = formatTg({ failed, results, errorMsg });
   log(msg.replace(/<[^>]+>/g, ''));
-  if (!silentOk) {
+  // 开机接口 5xx（节点暂时不可达）：不发 TG，交给工作流 5 分钟后重跑一次；重跑仍失败才通知
+  const bad = results.filter((r) => !r.ok);
+  const retry =
+    failed && !errorMsg && bad.length > 0 && bad.every((r) => r.retryable) &&
+    process.env.RETRIED !== 'true';
+  if (retry) {
+    log('开机接口 5xx，标记 5 分钟后重跑工作流，本次不发 TG');
+    if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, 'retry=1\n');
+  } else if (!silentOk) {
     await tg(msg, { parseMode: 'HTML' });
   } else {
     log('全部运行中，跳过 TG 通知');
