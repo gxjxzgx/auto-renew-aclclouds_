@@ -103,6 +103,12 @@ async function ensureRunningHosting(page, server) {
     return { id, name, ok: true, action: 'skip', text: `${name}: DRY_RUN，未检查` };
   }
   let r = await hostingStart(page, appId);
+  if (!r.ok && r.status >= 500) {
+    log(`[${name}] 开机接口 ${r.status}（节点暂时不可达），5 分钟后重试一次`);
+    await page.waitForTimeout(300000);
+    r = await hostingStart(page, appId);
+    log(`[${name}] 重试结果: HTTP ${r.status}`);
+  }
   const read = (x) => String(x?.data?.state || x?.data?.attributes?.state || '').toLowerCase();
   let st = read(r);
   log(`[${name}] 新平台实时状态: ${st || '未知'} uptime_s=${r?.data?.uptime_s ?? '-'}`);
