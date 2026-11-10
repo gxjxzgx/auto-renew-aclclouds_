@@ -319,7 +319,6 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Power check
-        id: power
         id: run
         env:
           ACL_USERNAME: ${{ secrets.ACL_USERNAME }}
@@ -342,7 +341,7 @@ jobs:
         run: node power.mjs
 
       - name: 503 后重跑工作流
-        if: ${{ failure() && steps.power.outputs.retry == '1' }}
+        if: ${{ failure() && steps.run.outputs.retry == '1' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
